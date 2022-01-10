@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+'''
+Storage benchmarking tool
+'''
+
+# Import standard libraries
+import argparse
+import datetime
+import os
+import pprint
+import subprocess
+import sys
+import yaml
+
+OPTIONS = {}
+
+
+#class ExtendAction(argparse.Action):
+#    '''
+#    Class for extending argparse actions
+#    '''
+#    def __call__(self, parser, namespace, values, option_string=None):
+#        items = getattr(namespace, self.dest) or []
+#        items.extend(values)
+#        setattr(namespace, self.dest, items)
+
+
+def assemble_command(test, settings):
+    '''
+    Function to assemble the command to be run
+    '''
+    # Assemble the command
+    command = []
+
+    if OPTIONS['gender'] or OPTIONS['target']:
+        # ... add pdsh
+        command.extend([OPTIONS['pdsh_path']])
+
+        # ....... add the pdsh gender or target
+        if OPTIONS['gender']:
+            command.extend(['-g', OPTIONS['gender']])
+        else:
+            command.extend(['-w', OPTIONS['target']])
+
+    # ... add the fio command
+    command.extend([
+        OPTIONS['fio_path'],
+        '--directory=%s' % (OPTIONS['directory']),
+        '--filename_format=benchmark-data.\\$jobnum.\\$filenum',
+        '--name=validation',
+        '--group_reporting',
+        '--time_based',
+        '--output-format=terse',
+        '--ioengine=libaio',
+        '--norandommap',
+        '--iodepth=%s' % (settings[test]['iodepth']),
+        '--rw=%s' % (settings[test]['fio_test']),
+        '--bs=%s' % (settings[test]['blocksize']),
+        '--direct=1',
+        '--size=%s' % (settings[test]['filesize']),
+        '--filesize=%s' % (settings[test]['filesize']),
+        '--numjobs=8',
+        '--runtime=%s' % (settings[test]['runtime']),
+    ])
+
+    # ... set readwrite tests to a mix of 75% read
+    if settings[test]['fio_test'] == 'readwrite':
+        command.extend(['--rwmixread=75'])
+
+    # ... additional settings for the IOPs test
+    if test == 'iops':
+        command.extend([
+            '--iodepth_batch_complete=8',
+            '--iodepth_batch_submit=8',
+        ])
+
+    return command
+
+
+def run_test(test):
+    '''
+    Function to run the actual test
+    '''
+    # Set up our requirements and parameters
+    settings = get_settings()
+    if settings is None:
+        error('unable to get settings')
+        return
+
+    command = assemble_command(test, settings)
+    if command is None:
+        return
+
+    if OPTIONS['noop'] is True:
+        print_command(command)
+    else:
+        print('[ %s - %s ]' % (datetime.datetime.now(), OPTIONS['directory']))
+        print_command(command)
+        print('Running %s-second "%s" test, %s blocksize ... Required result: ' % (settings[test]['runtime'], test, settings[test]['blocksize']), end='')
+
+        delimiter = ''
+        if settings[test]['read'] > 0:
+            print('read >= %s/s' % (kibibytes_to_human(settings[test]['read'])), end='')
+            delimiter = ', '
+
+        if settings[test]['write'] > 0:
+            print('%swrite >= %s/s' % (delimiter, kibibytes_to_human(settings[test]['write'])), end='')
+            delimiter = ', '
+
+        if settings[test]['iops'] > 0:
+            print('%siops >= %s' % (delimiter, settings[test]['iops']), end='')
+
+        print('')
+
+        # Run the test
+        if 'run' in dir(subprocess):
+            try:
+                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except subprocess.CalledProcessError as err:
+                print('unable to run command with subprocess.run(): %s' % (err.output))
+
+            if result.returncode != 0:
+                fatal('Unable to run test: %s' % (result.stderr.decode("utf-8").splitlines()))
+
+            # Sort the resultant data into an array
+            result_data = sorted(result.stdout.decode("utf-8").splitlines())
+        else:
+            try:
+                result = subprocess.check_output(command)
+            except subprocess.CalledProcessError as err:
+                fatal('unable to run command with subprocess.check_output(): %s' % (err.output))
+
+            # Sort the resultant data into an array
+            result_data = sorted(result.decode("utf-8").splitlines())
+
+        # Print the results
+        print_results(test, result_data, settings)
+
+    return
+
+
+def print_results(test, result_data, settings):
+    '''
+    Function to print the test results
+    '''
+    # Initialize the totals
+    total_read_bw = 0
+    total_read_iops = 0
+    total_write_bw = 0
+    total_write_iops = 0
+
+    # Iterate over the results
+    for line in result_data:
+        host = line.split(':')[0]
+        data = line.split(';')
+
+        # Total the metrics
+        total_read_bw = total_read_bw + int(data[6])
+        total_read_iops = total_read_iops + int(data[7])
+        total_write_bw = total_write_bw + int(data[47])
+        total_write_iops = total_write_iops + int(data[48])
+
+        if OPTIONS['verbose'] is True:
+            print('%-10s read: %10s/s %7s iops -- write: %10s/s %7s iops' % (host, kibibytes_to_human(int(data[6])), data[7], kibibytes_to_human(int(data[47])), data[48]))
+
+    # Combine the read and write IOPS
+    total_iops = total_read_iops + total_write_iops
+
+    if OPTIONS['verbose'] is True:
+        print('===============================================================================')
+    print('%-10s read: %10s/s %7s iops -- write: %10s/s %7s iops' % ('total', kibibytes_to_human(total_read_bw), total_read_iops, kibibytes_to_human(total_write_bw), total_write_iops))
+    print('%-10s IOPS %s combined' % ('total', total_iops))
+
+    # Determine pass or fail
+    if total_iops >= settings[test]['iops'] and total_read_bw >= settings[test]['read'] and total_write_bw >= settings[test]['write']:
+        print_pass()
+    else:
+        print_fail()
+
+    print('')
+
+    return
+
+
+def get_settings():
+    '''
+    Return a dictionary of test settings and requirements
+    '''
+
+    # List of tests - used to simplify processing/population loops
+    tests = [
+        'read',
+        'write',
+        'randread',
+        'randwrite',
+        'readwrite',
+        'randrw',
+        'iops',
+        'burn',
+    ]
+
+    # List of default parameters and values
+    defaults = {
+        'blocksize': '1m',
+        'filesize': '384G',
+        'iodepth': 64,
+        'runtime': 600,
+        'read': 0,
+        'write': 0,
+        'iops': 0,
+    }
+
+    # Read the YAML data
+    if os.path.isfile(OPTIONS['yaml']):
+        with open(OPTIONS['yaml'], 'r') as handle:
+            yaml_data = yaml.safe_load(handle)
+    else:
+        return None
+
+    # Assemble the settings for the tests
+    settings = {}
+
+    # Set the defaults for each test
+    for test in tests:
+        settings[test] = defaults.copy()
+        settings[test]['fio_test'] = test
+
+    # Override the defaults using the YAML file
+
+    # ... read test
+    settings['read']['read'] = yaml_data['results']['streaming']['read']
+
+    # ... write test
+    settings['write']['write'] = yaml_data['results']['streaming']['write']
+
+    # ... readwrite test
+    settings['readwrite']['read'] = yaml_data['results']['readwrite']['read']
+    settings['readwrite']['write'] = yaml_data['results']['readwrite']['write']
+
+    # ... randread test
+    settings['randread']['read'] = yaml_data['results']['random']['read']
+
+    # ... randwrite test
+    settings['randwrite']['write'] = yaml_data['results']['random']['write']
+
+    # ... randrw test
+    settings['randrw']['read'] = yaml_data['results']['randrw']['read']
+    settings['randrw']['write'] = yaml_data['results']['randrw']['write']
+
+    # ... iops test
+    settings['iops']['fio_test'] = 'readwrite'
+    settings['iops']['blocksize'] = '4k'
+    settings['iops']['filesize'] = '4G'
+    settings['iops']['iodepth'] = 256
+    settings['iops']['iops'] = yaml_data['results']['streaming']['iops']
+
+    # ... burn-in
+    settings['burn']['fio_test'] = 'readwrite'
+    settings['burn']['runtime'] = 259200
+
+    # Override any test-specific values from the YAML file
+    if 'tests' in yaml_data:
+        for test in tests:
+            if test in yaml_data['tests']:
+                settings[test].update(yaml_data['tests'][test])
+
+    # Override any values from the command-line
+    for key in defaults:
+        if key in OPTIONS:
+            if OPTIONS[key] is not None:
+                for test in tests:
+                    settings[test][key] = OPTIONS[key]
+
+    # Return the settings structure
+    return settings
+
+
+def parse_arguments():
+    '''
+    Parse the command-line arguments
+    '''
+    parser = argparse.ArgumentParser(description='Storage benchmark & validation tool')
+    #parser.register('action', 'extend', ExtendAction)
+
+    parser.add_argument(
+        '--noop',
+        dest='noop',
+        action='store_true',
+        help='Do not do anything (noop)',
+    )
+
+    required = parser.add_argument_group('required arguments')
+
+    required.add_argument(
+        '-g',
+        dest='gender',
+        help='pdsh gender to use (e.g. foo-all) ... either this or "-w" is required',
+    )
+
+    required.add_argument(
+        '-w',
+        dest='target',
+        help='pdsh target to use (e.g. foo[01-04]) ... either this or "-g" is required',
+    )
+
+    required.add_argument(
+        '--test',
+        dest='test',
+        action='append',
+        required=True,
+        choices=['read', 'write', 'randread', 'randwrite', 'readwrite', 'randrw', 'data', 'random', 'streaming', 'iops', 'acceptance', 'burn'],
+        help='Type of test to run (use "data" to run both read and write tests - use "acceptance" to run both data and iops tests)',
+    )
+
+    required.add_argument(
+        '--config',
+        dest='yaml',
+        metavar='YAML_FILE',
+        required=True,
+        help='Specify the YAML file with the expected results and test options',
+    )
+
+    required.add_argument(
+        'directory',
+        help='Prefix filenames with this directory',
+    )
+
+    tuning = parser.add_argument_group('tuning arguments')
+
+    tuning.add_argument(
+        '--runtime',
+        dest='runtime',
+        metavar='SECONDS',
+        type=int,
+        help='Duration, in seconds, of the test',
+    )
+
+    output = parser.add_argument_group('output arguments')
+
+    output.add_argument(
+        '--colorize',
+        dest='colorize',
+        action='store_true',
+        help='Colorize the PASS/FAIL results',
+    )
+
+    output.add_argument(
+        '--debug',
+        dest='debug',
+        action='store_true',
+        help='Print debugging output',
+    )
+
+    output.add_argument(
+        '--verbose',
+        dest='verbose',
+        action='store_true',
+        help='Print more verbose output',
+    )
+
+
+    optional = parser.add_argument_group('optional arguments')
+
+    optional.add_argument(
+        '--pdsh_path',
+        dest='pdsh_path',
+        metavar='PATH',
+        default='/usr/bin/pdsh',
+        help='Path to the pdsh binary [default: %(default)s]',
+    )
+
+    optional.add_argument(
+        '--fio_path',
+        dest='fio_path',
+        metavar='PATH',
+        default='/usr/bin/fio',
+        help='Path to the fio(binary [default: %(default)s]',
+    )
+
+    # Parse the command-line arguments
+    args = parser.parse_args()
+
+    # We must have either -g or -w
+    if not (args.gender or args.target):
+        parser.error('Must supply either a gender or a target')
+
+    if args.gender and args.target:
+        parser.error('Can not supply both gender and target')
+
+    # Assemble the OPTIONS array
+    OPTIONS.update(vars(args))
+
+    return
+
+
+def print_command(command):
+    '''
+    Helper function to pretty print the pdsh/fio command
+    '''
+    if OPTIONS['debug'] is True:
+        length = len(command)
+        print('debug: Command:')
+        print('%s %s %s \\' % (command[0], command[1], command[2]))
+        print('    %s \\' % (command[3]))
+        for index in range(4, length):
+            print('        %s' % (command[index]), end='')
+            if index < length - 1:
+                print(' \\')
+            else:
+                print('')
+
+    return
+
+
+def print_pass():
+    '''
+    Helper function to print the PASS result
+    '''
+    if OPTIONS['colorize'] is True:
+        print('Result: \033[92mPASS\033[0m')
+    else:
+        print('Result: PASS')
+
+    return
+
+
+def print_fail():
+    '''
+    Helper function to print the FAIL result
+    '''
+    if OPTIONS['colorize'] is True:
+        print('Result: \033[91mFAIL\033[0m')
+    else:
+        print('Result: FAIL')
+
+    return
+
+
+def kibibytes_to_human(num, suffix='B'):
+    '''
+    Function to convert bytes to a human readable string
+    '''
+    for unit in ['Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi']:
+        if abs(num) < 1024.0:
+            return "%3.2f%s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.2f%s%s" % (num, 'Yi', suffix)
+
+
+def debug(string):
+    '''
+    Helper function to log/print debugging messages.
+    Messages will be prepended with the tag "debug", which will also
+    include the current thread's identifier.
+    '''
+    if OPTIONS['debug'] is True:
+        if OPTIONS['noop'] is True:
+            string = '%s (noop)' % (string)
+        logprint('debug: %s' % (string))
+    return
+
+
+def error(string):
+    '''
+    Helper function to log/print non-fatal error messages.
+    '''
+    logprint('error: %s' % (string))
+    return
+
+
+def fatal(string):
+    '''
+    Helper function to log/print fatal error messages and exit.
+    '''
+    logprint('fatal: %s' % (string))
+    sys.exit(1)
+    return
+
+
+def verbose(string):
+    '''
+    Helper function to print verbose messages
+    '''
+    if OPTIONS['verbose'] is True:
+        if OPTIONS['noop'] is True:
+            string = '%s (noop)' % (string)
+        logprint('%s' % (string))
+    return
+
+
+def logprint(string):
+    '''
+    Helper function to log and print messages.  Generally
+    this will be called by higher-level functions such as
+    debug, error, fatal, notice, and warning.
+    '''
+
+    #syslog.syslog('%s: %s' % (userconn,string))
+    print(string)
+
+    return
+
+
+def main():
+    '''
+    Main processing function
+    '''
+
+    # parse our command-line arguments
+    parse_arguments()
+
+    pprint.pprint(OPTIONS, indent=4, width=160)
+
+    # Run the tests
+    for test in OPTIONS['test']:
+        if test == 'acceptance':
+            run_test('read')
+            run_test('write')
+            run_test('randread')
+            run_test('randwrite')
+            run_test('readwrite')
+            run_test('randrw')
+            run_test('iops')
+        if test == 'data':
+            run_test('read')
+            run_test('write')
+            run_test('randread')
+            run_test('randwrite')
+            run_test('readwrite')
+            run_test('randrw')
+        if test == 'streaming':
+            run_test('read')
+            run_test('write')
+            run_test('readwrite')
+        if test == 'random':
+            run_test('randread')
+            run_test('randwrite')
+            run_test('randrw')
+        else:
+            run_test(test)
+
+
+
+# Allow other programs to source this one as a library
+if __name__ == '__main__':
+    try:
+        main()
+    finally:
+        sys.exit(0)

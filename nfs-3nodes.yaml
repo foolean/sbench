@@ -1,0 +1,85 @@
+# sbench-nfs-3nodes.yaml
+#
+#   Storage benchmarking expected results and settings for testing
+#   the use of NFS with 3 10G connected clients.
+#
+###############################################################################
+
+
+# results:
+#
+#   Specify the expected results.
+#
+#   Structure:
+#       results:
+#           <result_class>:
+#               <result_type>: <value>
+#
+#   Result classes:
+#       streaming:  Streaming read or write tests
+#       random:     Random read or write tests
+#       readwrite:  Streaming read and write (mixed) tests
+#       randrw:     Random read and write (mixed) tests
+#
+#   Result types:
+#       read:   Integer KiB/s
+#       write:  Integer KiB/s
+#       iops:   Integer
+#
+###############################################################################
+results:
+    streaming:
+        read: 3670016
+        write: 3670016
+        iops: 100000
+    random:
+        read: 563200
+        write: 563200
+        iops: 100000
+    readwrite:
+        read: 1572864
+        write: 563200
+        iops: 100000
+    randrw:
+        read: 409600
+        write: 409600
+        iops: 100000
+
+# tests:
+#
+#   Test specific values
+#
+#   Structure:
+#       tests:
+#           <test>:
+#               <parameter>: <value>
+#
+#   Test names:
+#       read:       Streaming read test
+#       write:      Streaming write test
+#       randread:   Random read test
+#       randwrite:  Random write test
+#       readwrite:  Streaming read/write test
+#       randrw:     Random read/write test
+#       iops:       IOPs test)
+#       burn:       Burn-in
+#
+#   Parameters:
+#       blocksize:  Block size for reads and writes
+#       filesize:   Size of the file to use for testing
+#       iodepth:    Number of I/O units to keep in flight
+#       runtime:    How long to run the tests
+#       read:       Expected read result in KiB
+#       write:      Expected write result in KiB
+#       iops:       Expected IOPs result
+#
+#   Notes:
+#       IOPs test uses readwrite with a 4G file, 4K blocksize, and 256 iodepth
+#
+#       Burn-in uses readwrite with a long runtime
+###############################################################################
+#tests:
+#    write:
+#        blocksize: '16m'
+#    randwrite:
+#        blocksize: '16m'
