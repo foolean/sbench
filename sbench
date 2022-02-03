@@ -521,18 +521,18 @@ def main():
             run_test('readwrite')
             run_test('randrw')
             run_test('iops')
-        if test == 'data':
+        elif test == 'data':
             run_test('read')
             run_test('write')
             run_test('randread')
             run_test('randwrite')
             run_test('readwrite')
             run_test('randrw')
-        if test == 'streaming':
+        elif test == 'streaming':
             run_test('read')
             run_test('write')
             run_test('readwrite')
-        if test == 'random':
+        elif test == 'random':
             run_test('randread')
             run_test('randwrite')
             run_test('randrw')
