@@ -43,11 +43,10 @@ def valid_test(arg_value):
 
 def normalize_tests(tests):
     '''
+    Function to normalize the list of tests to be run
     '''
-
     # Remove duplicates
     results = list(dict.fromkeys(tests))
-    print('moo')
 
     STREAMING = ['read', 'write', 'readwrite']
     RANDOM = ['randread', 'randwrite', 'randrw']
@@ -215,15 +214,15 @@ def print_results(test, result_data, settings):
         total_write_iops = total_write_iops + int(data[48])
 
         if OPTIONS['verbose'] is True:
-            print('%-10s read: %10s/s %7s iops -- write: %10s/s %7s iops' % (host, kibibytes_to_human(int(data[6])), data[7], kibibytes_to_human(int(data[47])), data[48]))
+            print('%-20s read: %10s/s %7s iops -- write: %10s/s %7s iops' % (host, kibibytes_to_human(int(data[6])), data[7], kibibytes_to_human(int(data[47])), data[48]))
 
     # Combine the read and write IOPS
     total_iops = total_read_iops + total_write_iops
 
     if OPTIONS['verbose'] is True:
         print('===============================================================================')
-    print('%-10s read: %10s/s %7s iops -- write: %10s/s %7s iops' % ('total', kibibytes_to_human(total_read_bw), total_read_iops, kibibytes_to_human(total_write_bw), total_write_iops))
-    print('%-10s IOPS %s combined' % ('total', total_iops))
+    print('%-20s read: %10s/s %7s iops -- write: %10s/s %7s iops' % ('total', kibibytes_to_human(total_read_bw), total_read_iops, kibibytes_to_human(total_write_bw), total_write_iops))
+    print('%-20s IOPS %s combined' % ('total', total_iops))
 
     # Determine pass or fail
     if total_iops >= settings[test]['iops'] and total_read_bw >= settings[test]['read'] and total_write_bw >= settings[test]['write']:
@@ -567,7 +566,8 @@ def main():
     # parse our command-line arguments
     parse_arguments()
 
-    pprint.pprint(OPTIONS, indent=4, width=160)
+    if OPTIONS['debug'] is True:
+        pprint.pprint(OPTIONS, indent=4, width=160)
 
     # Run the tests
     for test in OPTIONS['test']:
